@@ -1,4 +1,4 @@
-This project was submitted to the ryze.ai hackathon by sunburnedasian.
+This project was submitted to the ryze.ai hackathon by sxlvlblade/sunburnedasian/sail_pvp.
 
 # TinyTactician
 
