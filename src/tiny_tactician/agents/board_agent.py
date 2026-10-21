@@ -13,6 +13,7 @@ on a laptop stays fast enough to play interactively.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 from tiny_tactician.games.mcts import search
@@ -64,6 +65,7 @@ class BoardAgent:
     model_weight: float = 0.5
     model_prior_plies: int = 8
     explain: bool = True
+    time_budget: float = 0.0
 
     def _plies_played(self, dark: int, light: int, plies: int | None = None) -> int:
         """Number of moves played so far (the opening position counts as zero).
@@ -95,6 +97,9 @@ class BoardAgent:
         plies: int | None = None,
     ) -> MoveChoice:
         """Pick a move for ``color`` and (optionally) explain it."""
+        # The budget starts before the model is consulted, so the model costs
+        # the agent time out of the same allowance as the search.
+        deadline = (time.monotonic() + self.time_budget) if self.time_budget > 0 else None
         model_prior, prior = self._root_prior(dark, light, color, plies)
         root_position = (dark, light, color)
 
@@ -113,6 +118,7 @@ class BoardAgent:
             prior_fn=prior_fn,
             c_puct=self.c_puct,
             seed=self.seed,
+            deadline=deadline,
         )
         choice = MoveChoice(move=best, policy=policy, prior=prior, model_prior=model_prior)
         if (self.explain if comment is None else comment) and self.strategy is not None and best:

@@ -138,7 +138,7 @@ Requires Python 3.10+ and the `llama` binary from llama.cpp.
 curl -LsSf https://llama.app/install.sh | sh
 
 # 2. this project
-git clone https://github.com/your-handle/tiny-tactician
+git clone https://github.com/sunburnedasian/tiny-tactician
 cd tiny-tactician
 python -m venv .venv && source .venv/bin/activate
 pip install -e .

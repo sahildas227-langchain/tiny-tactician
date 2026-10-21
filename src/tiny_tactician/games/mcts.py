@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import random
+import time
 from dataclasses import dataclass, field
 
 from tiny_tactician.games.reversi import (
@@ -26,7 +27,7 @@ from tiny_tactician.games.reversi import (
     play,
 )
 
-__all__ = ["Node", "search", "rollout"]
+__all__ = ["Node", "search", "rollout", "weighted_move"]
 
 _C_PUCT = 1.41
 
@@ -108,7 +109,14 @@ def backprop(node: Node | None, value: float) -> None:
         node = node.parent
 
 
-def _weighted_move(dark: int, light: int, color: int, rng: random.Random) -> int:
+def weighted_move(dark: int, light: int, color: int, rng: random.Random) -> int:
+    """Pick a move with probability proportional to the positional weights.
+
+    This is the rollout policy: half the play-outs follow it and half are
+    uniform, which keeps the play-outs cheap but not blind.  It is shared with
+    the MUCT baseline so that the two searches are compared on the search
+    algorithm rather than on the play-out policy.
+    """
     legal_bit = legal_moves(dark, light, color)
     bits = [1 << i for i in _set_bits(legal_bit)]
     if not bits:
@@ -141,7 +149,7 @@ def rollout(dark: int, light: int, color: int, rng: random.Random, heuristic_wei
         if legal_bit == 0:
             color = -color
             continue
-        move = _weighted_move(dark, light, color, rng) if rng.random() < heuristic_weight else _rand_move(legal_bit, rng)
+        move = weighted_move(dark, light, color, rng) if rng.random() < heuristic_weight else _rand_move(legal_bit, rng)
         dark, light = play(dark, light, color, move)
         color = -color
     return outcome(dark, light)
@@ -157,17 +165,21 @@ def search(
     seed: int = 0,
     root_noise: bool = False,
     noise_eps: float = 0.25,
+    deadline: float | None = None,
 ) -> tuple[dict[int, float], int, Node]:
     """Run a PUCT search; return ``(policy, best_move, root)``.
 
     ``policy`` is the normalized visit-count distribution over legal moves and
     ``best_move`` is the most visited move (``PASS`` if the position is
-    terminal).
+    terminal).  Pass ``deadline`` (a ``time.monotonic()`` value) to stop the
+    search on a wall-clock budget instead of a simulation count.
     """
     rng = random.Random(seed)
     root = Node(dark, light, color)
     root.expand(prior_fn, rng=rng, root_noise=root_noise, noise_eps=noise_eps)
-    for _ in range(n_sims):
+    for i in range(n_sims):
+        if deadline is not None and i % 32 == 0 and time.monotonic() >= deadline:
+            break
         node = root
         while node.expanded and not node.terminal:
             child = select_child(node, c_puct)

@@ -157,6 +157,32 @@ class LlamaCppServer:
             payload["grammar"] = grammar
         return str(self._post(payload).get("content", ""))
 
+    def complete_timed(
+        self,
+        prompt: str,
+        n_predict: int | None = None,
+        stop: list[str] | None = None,
+        grammar: str | None = None,
+        cache_prompt: bool = True,
+    ) -> dict:
+        """Like :meth:`complete`, but also returns llama.cpp's timing report."""
+        cfg = self.config
+        payload = {
+            "prompt": prompt,
+            "n_predict": n_predict if n_predict is not None else cfg.n_predict,
+            "temperature": cfg.temperature,
+            "top_p": cfg.top_p,
+            "top_k": cfg.top_k,
+            "repeat_penalty": cfg.repeat_penalty,
+            "seed": cfg.seed,
+            "stop": stop or [],
+            "cache_prompt": cache_prompt,
+        }
+        if grammar:
+            payload["grammar"] = grammar
+        body = self._post(payload)
+        return {"content": str(body.get("content", "")), "timings": body.get("timings", {})}
+
     def complete_logprobs(self, prompt: str, n_predict: int = 1, n_probs: int = 20, temperature: float = 1.0) -> list[dict]:
         """Return the top-``n_probs`` log-probabilities for each generated position.
 

@@ -43,8 +43,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-handle/tiny-tactician"
-Repository = "https://github.com/your-handle/tiny-tactician"
+Homepage = "https://github.com/sunburnedasian/tiny-tactician"
+Repository = "https://github.com/sunburnedasian/tiny-tactician"
 
 [project.scripts]
 tiny-tactician = "tiny_tactician.run.cli:main"

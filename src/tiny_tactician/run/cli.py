@@ -11,6 +11,7 @@ Subcommands
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import typer
@@ -275,6 +276,154 @@ def ablate(
     finally:
         if server is not None:
             server.stop()
+
+
+@app.command()
+def bench(
+    games: int = typer.Option(20, "--games", help="Games per pair of agents."),
+    time_budget: float = typer.Option(0.5, "--time-budget", help="Seconds per move, the same for every agent."),
+    seed: int = typer.Option(0, "--seed", help="Random seed."),
+    with_model: bool = typer.Option(True, "--with-model/--no-model", help="Include TinyTactician with its model prior."),
+    model_path: Path = typer.Option(None, "--model", help="Path to the GGUF weights."),
+    threads: int = typer.Option(0, "--threads", help="CPU threads for inference (0 = all)."),
+    gpu_layers: int = typer.Option(0, "--gpu-layers", help="Layers to offload to the GPU."),
+) -> None:
+    """Benchmark the agent against reference Othello engines.
+
+    Every engine gets the same wall-clock budget per move, and the two sides
+    alternate between dark and light, so the result measures playing strength
+    rather than simulation throughput.
+    """
+    from tiny_tactician.bench import build_agents, elo_from_score, round_robin
+    from tiny_tactician.bench.speed import benchmark_engine, benchmark_search
+
+    agents = build_agents(time_budget, seed)
+    server = None
+    if with_model:
+        console.print(f"[bold green]Loading {MODEL_LABEL}...[/bold green]")
+        agent, server = _build_agent(model_path, 100000, seed, True, False, threads, gpu_layers)
+        agent.time_budget = time_budget
+        agents["tiny-tactician"] = _AgentAdapter(agent)
+    # The same search without the model, to isolate what the model contributes.
+    agents["tiny-tactician (no model)"] = _AgentAdapter(
+        BoardAgent(None, n_sims=10**9, seed=seed, use_model_prior=False, explain=False, time_budget=time_budget)
+    )
+    console.print(f"[dim]{games} games per pair, {time_budget:.2f}s per move, seed {seed}[/dim]\n")
+
+    results = round_robin(agents, games_per_pair=games, seed=seed)
+
+    table = Table(title="Othello round robin")
+    table.add_column("agent")
+    table.add_column("W", justify="right")
+    table.add_column("L", justify="right")
+    table.add_column("D", justify="right")
+    table.add_column("score", justify="right")
+    table.add_column("Elo", justify="right")
+    table.add_column("vs random", justify="right")
+    table.add_column("avg disc margin", justify="right")
+    for name, result in results.items():
+        vs_random = result.opponents.get("random")
+        random_score = (vs_random[0] + 0.5 * vs_random[1]) / max(sum(vs_random), 1) if vs_random else float("nan")
+        margin = result.disc_total / result.games if result.games else 0
+        table.add_row(
+            name,
+            str(result.wins),
+            str(result.losses),
+            str(result.draws),
+            f"{result.score:.1%}",
+            f"{elo_from_score(result.score):+.0f}",
+            f"{random_score:.1%}" if vs_random else "-",
+            f"{margin:+.1f}",
+        )
+    console.print(table)
+
+    matrix = Table(title="head to head (win% for the row agent)")
+    names = list(results)
+    matrix.add_column("agent")
+    for other in names:
+        matrix.add_column(other)
+    for name in names:
+        row = [name]
+        for other in names:
+            if other == name:
+                row.append("-")
+                continue
+            record = results[name].opponents.get(other)
+            if not record:
+                row.append("-")
+                continue
+            total = sum(record)
+            row.append(f"{(record[0] + 0.5 * record[1]) / total:.0%}")
+        matrix.add_row(*row)
+    console.print(matrix)
+
+    speed = benchmark_engine()
+    console.print(
+        f"[dim]engine: {speed['legal_moves_per_sec']:,.0f} legal-move queries/s, "
+        f"{speed['play_moves_per_sec']:,.0f} moves/s[/dim]"
+    )
+    for row in benchmark_search():
+        console.print(f"[dim]search: {row['n_sims']:>5} sims in {row['seconds']:.3f}s "
+                      f"({row['sims_per_sec']:,.0f} sims/s)[/dim]")
+    if server is not None:
+        server.stop()
+
+
+@dataclass
+class _AgentAdapter:
+    """Gives the board agent the same interface as the reference engines."""
+
+    agent: BoardAgent
+
+    def move(self, dark: int, light: int, color: int) -> int:
+        return self.agent.choose_move(dark, light, color).move
+
+
+@app.command()
+def bench_model(
+    model_path: Path = typer.Option(None, "--model", help="Path to the GGUF weights."),
+    threads: int = typer.Option(0, "--threads", help="CPU threads for inference (0 = all)."),
+    gpu_layers: int = typer.Option(0, "--gpu-layers", help="Layers to offload to the GPU."),
+    runs: int = typer.Option(5, "--runs", help="How many completions to time."),
+) -> None:
+    """Measure the on-device model's throughput.
+
+    Run it once with the CPU build and once with a CUDA build to see what the
+    GPU buys:
+
+        tiny-tactician bench-model
+        LLAMA_BIN=~/.local/llama-cuda/.../bin/llama tiny-tactician bench-model --gpu-layers 99
+    """
+    from tiny_tactician.bench.speed import benchmark_model
+    from tiny_tactician.models.strategy import _chat_prompt
+
+    path = model_path or default_model_path()
+    binary = find_llama_binary()
+    console.print(f"[bold]binary:[/bold] {binary}")
+    console.print(f"[bold]gpu layers:[/bold] {gpu_layers}  [bold]threads:[/bold] {threads or 'all'}")
+    server = LlamaCppServer(LlamaCppConfig(model_path=path, n_threads=threads, n_gpu_layers=gpu_layers))
+    server.start()
+    try:
+        user = (
+            "Othello position (X=dark, O=light, '.',=empty, '*'=legal square):\n\n"
+            "   a b c d e f g h\n"
+            "8  . . . . . . . .\n7  . . . . . . . .\n6  . . . . * . . .\n"
+            "5  . . . X O . . .\n4  . . * O X . . .\n3  . . . * . . . .\n"
+            "2  . . . . . . . .\n1  . . . . . . . .\n\n"
+            "Which move is best?\n1. c3\n2. d3\n3. e3\n\nReply with the number only."
+        )
+        stats = benchmark_model(server, _chat_prompt(user), n_predict=1, runs=runs)
+        table = Table(title="model throughput")
+        table.add_column("metric")
+        table.add_column("value")
+        table.add_row("seconds per call", f"{stats['seconds_per_call']:.3f}")
+        table.add_row("prompt tokens", str(stats["prompt_tokens"]))
+        table.add_row("prompt tokens/s", f"{stats['prompt_per_second']:.1f}" if stats["prompt_per_second"] else "-")
+        table.add_row("generated tokens", str(stats["predicted_tokens"]))
+        table.add_row("generation tokens/s", f"{stats['predicted_per_second']:.1f}" if stats["predicted_per_second"] else "-")
+        console.print(table)
+    finally:
+        server.stop()
 
 
 @app.command()
