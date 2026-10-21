@@ -412,7 +412,7 @@ def bench_model(
             "2  . . . . . . . .\n1  . . . . . . . .\n\n"
             "Which move is best?\n1. c3\n2. d3\n3. e3\n\nReply with the number only."
         )
-        stats = benchmark_model(server, _chat_prompt(user), n_predict=1, runs=runs)
+        stats = benchmark_model(server, _chat_prompt(user), n_predict=32, runs=runs)
         table = Table(title="model throughput")
         table.add_column("metric")
         table.add_column("value")

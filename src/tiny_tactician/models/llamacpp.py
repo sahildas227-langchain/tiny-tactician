@@ -106,9 +106,29 @@ class LlamaCppServer:
         cfg = self.config
         if not Path(cfg.model_path).is_file():
             raise FileNotFoundError(f"model file not found: {cfg.model_path}")
-        self.process = subprocess.Popen(self.command(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.process = subprocess.Popen(
+            self.command(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=self._environment(),
+        )
         self._wait_until_healthy()
         return self
+
+    def _environment(self) -> dict[str, str]:
+        """The child environment, with the runtime's own libraries on the path.
+
+        A CUDA build of llama.cpp ships its shared libraries next to the
+        binary, and the CUDA runtime in a sibling directory; both have to be
+        on ``LD_LIBRARY_PATH`` for the GPU backend to load.
+        """
+        env = dict(os.environ)
+        binary = Path(self.command()[0]).resolve()
+        library_dirs = [str(binary.parent)]
+        library_dirs += [str(sibling) for sibling in binary.parent.parent.glob("cudart-*")]
+        existing = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = ":".join(library_dirs + ([existing] if existing else []))
+        return env
 
     def _wait_until_healthy(self) -> None:
         deadline = time.time() + self.config.startup_timeout

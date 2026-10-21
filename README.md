@@ -85,6 +85,126 @@ standard openings it reliably answers c4, d3, e6. The agent therefore uses the
 model's prior for the first few plies only, and hands over to the search
 afterwards. That is a measured decision, not a guess.
 
+## Benchmarks
+
+### Method
+
+Fairness is the whole problem in engine benchmarks, so the rules are strict:
+
+- **Equal wall-clock, not equal simulations.** Every engine gets the same
+  **0.30 s per move**. Comparing "1000 simulations" against "1000
+  simulations" would only flatter whichever engine has the cheaper iteration.
+- **The sides alternate.** Each pairing is played from both sides, so the
+  first-move advantage cannot decide the result.
+- **The model spends the same budget.** When the model is consulted, its
+  latency comes out of the same 0.30 s allowance as the search.
+- **The play-out policy is shared.** MUCT and PUCT use the same rollouts, so
+  the comparison is between search algorithms rather than between play-out
+  policies.
+
+Reproduce it with one command:
+
+```bash
+tiny-tactician bench --games 6 --time-budget 0.3 --seed 1
+```
+
+### Reference engines
+
+| engine | what it is |
+|---|---|
+| `random` | uniform random legal move |
+| `greedy` | one ply of the static evaluation |
+| `alpha-beta` | iterative-deepening negamax - the classic way to write a strong Othello engine |
+| `muct` | Monte Carlo UCT with progressive bias (Ito, 2010) - the canonical Monte-Carlo method for Othello |
+
+The baselines are covered by tests that check they return legal moves, that
+alpha-beta takes a corner whenever one is available, and that the strong
+engines beat random decisively. A benchmark only means something if the
+reference engines are sound.
+
+### Results
+
+Round robin, 6 games per pairing, 0.30 s per move, seed 1:
+
+| engine | W | L | D | score | Elo | vs random |
+|---|---|---|---|---|---|---|
+| `alpha-beta` | 28 | 1 | 1 | **95.0%** | +512 | 100% |
+| `tiny-tactician` (search only) | 21 | 7 | 2 | **73.3%** | +176 | 91.7% |
+| `tiny-tactician` (with model) | 21 | 9 | 0 | **70.0%** | +147 | 100% |
+| `muct` | 12 | 18 | 0 | 40.0% | -70 | 100% |
+| `random` | 4 | 25 | 1 | 15.0% | -301 | - |
+| `greedy` | 2 | 28 | 0 | 6.7% | -458 | 33.3% |
+
+Head to head (win rate for the row engine):
+
+| engine | vs `alpha-beta` | vs `muct` | vs `tiny-tactician` |
+|---|---|---|---|
+| `alpha-beta` | - | 100% | 100% / 75% |
+| `tiny-tactician` (search only) | 25% | 100% | - |
+| `tiny-tactician` (with model) | 0% | 100% | 50% |
+| `muct` | 0% | - | 0% |
+
+### Reading the results honestly
+
+- **Alpha-beta beats our Monte-Carlo search** (100% and 75% of the games).
+  This is the expected result and it is the most useful thing in this
+  section: Othello has a low branching factor and a genuinely informative
+  evaluation, so alpha-beta with a good evaluation is very hard to beat. Our
+  search is a competent player, not a state-of-the-art one, and we would
+  rather say so than hide it.
+- **Our PUCT search beats MUCT 100%** of the time at equal wall-clock with
+  the same play-out policy. Prior-driven expansion is doing real work here.
+- **The model changes nothing** (50% head to head). This matches the
+  ablation above: a 360M model cannot read the board, so it has nothing to
+  contribute to move choice. We keep the model because it *explains* the
+  moves, not because it picks them.
+- **Greedy is worse than random.** One ply of evaluation is a bad player in
+  Othello: it grabs whatever the evaluation likes at that instant and walks
+  straight into a corner trap.
+- The sample is small (6 games per pairing, 30 games per engine). The
+  ordering is stable and matches the theory, but individual percentages
+  carry wide error bars.
+
+### How this compares to published engines
+
+The strongest Othello programs - Ed Gilbert's engine, Hector, the computer
+Othello tournament winners - are far stronger than anything in the table
+above. We did not run them and make no claim about the gap. What we do claim
+is that these numbers come from a from-scratch bitboard implementation in
+pure Python with no native extensions, and that the whole measurement is
+reproducible with one command.
+
+### Speed
+
+The engine is bitboard-based: a position is two 64-bit integers, so every
+operation is an integer bit-op. Measured on this machine (12 CPU threads,
+Python 3.14):
+
+| | |
+|---|---|
+| legal-move queries | **545,586 /s** |
+| move application | **819,089 /s** |
+| PUCT simulations | **~850 /s** |
+
+### The model on CPU vs GPU
+
+The CPU build of llama.cpp and the CUDA build (RTX 3050, all 99 layers
+offloaded) were measured on the same prompt:
+
+| | CPU, 12 threads | RTX 3050 | speed-up |
+|---|---|---|---|
+| seconds per call | 0.183 | **0.043** | **4.3x** |
+| prompt processing | 1,370 tok/s | **7,191 tok/s** | **5.2x** |
+| generation | 33.4 tok/s | **158.3 tok/s** | **4.7x** |
+
+The GPU build is one environment variable away:
+
+```bash
+# a CUDA build of llama.cpp
+LLAMA_BIN=~/.local/llama-cuda/llama-b11799/llama \
+  tiny-tactician play --gpu-layers 99
+```
+
 ## How it works
 
 ```
@@ -165,6 +285,13 @@ tiny-tactician explain --moves e3,f4
 # measure what the model actually contributes
 tiny-tactician ablate --games 12
 
+# benchmark against reference engines (alpha-beta, MUCT, greedy, random)
+tiny-tactician bench --games 6 --time-budget 0.3
+
+# measure the model's throughput, on CPU or on the GPU
+tiny-tactician bench-model
+LLAMA_BIN=~/.local/llama-cuda/llama-b11799/llama tiny-tactician bench-model --gpu-layers 99
+
 # verify the runtime and the parameter budget
 tiny-tactician doctor
 ```
@@ -209,6 +336,11 @@ src/tiny_tactician/
 │   └── board_agent.py  model prior + search + commentary
 ├── environments/
 │   └── reversi_env.py  game state and move loop
+├── bench/
+│   ├── evaluate.py     the standard Othello feature evaluation
+│   ├── baselines.py    random, greedy, alpha-beta and MUCT engines
+│   ├── tournament.py   round-robin harness with equal time budgets
+│   └── speed.py        engine, search and model throughput
 └── run/
     └── cli.py          the command line interface
 ```
